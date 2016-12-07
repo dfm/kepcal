@@ -1,0 +1,61 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+from __future__ import division, print_function
+
+import os
+import glob
+import fitsio
+import numpy as np
+import pandas as pd
+
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = lambda x, *args, **kwargs: x
+
+__all__ = ["index_ffis"]
+
+
+def index_ffis(data_directory):
+    pattern = os.path.join(data_directory, "ffi", "kplr*-cal.fits")
+    paths = sorted(glob.glob(pattern))
+    rows = []
+    filenames = []
+    for fn in tqdm(paths):
+        primary_hdr = fitsio.read_header(fn, 0)
+        filenames.append(os.path.split(fn)[-1][:-9])
+        entries = [
+            filenames[-1],
+            primary_hdr["QUARTER"],
+            primary_hdr["SEASON"],
+
+        ]
+        for k in range(1, primary_hdr["NEXTEND"]+1):
+            hdr = fitsio.read_header(fn, k)
+            assert hdr["CHANNEL"] == k
+            rows.append(entries + [
+                hdr.get("CRVAL1", np.nan), hdr.get("CRVAL2", np.nan),
+                hdr["CHANNEL"], hdr["SKYGROUP"], hdr["MODULE"], hdr["OUTPUT"],
+                hdr["TSTART"], hdr["TSTOP"], 0.5*(hdr["TSTART"]+hdr["TSTOP"]),
+            ])
+
+    data = np.array([tuple(r) for r in rows], dtype=[
+        ("filename", object),
+        ("quarter", int), ("season", int),
+        ("ra_ref", float), ("dec_ref", float),
+        ("channel", int), ("skygroup", int), ("module", int), ("output", int),
+        ("tstart", float), ("tstop", float), ("time", float),
+    ])
+    df = pd.DataFrame.from_records(data)
+    df.to_csv(os.path.join(data_directory, "index.csv"), index=False)
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("kepcal_data", help="the kepcal data directory")
+    args = parser.parse_args()
+
+    index_ffis(args.kepcal_data)
