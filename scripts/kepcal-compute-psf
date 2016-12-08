@@ -1,0 +1,94 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+from __future__ import division, print_function
+
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
+
+import fitsio
+from tqdm import tqdm
+
+from astropy import wcs
+from astropy.visualization import SqrtStretch
+from astropy.visualization.mpl_normalize import ImageNormalize
+
+__all__ = ["compute_psf"]
+
+
+def compute_psf(data_directory, fn, mag_range=[9, 14], hw=20):
+    # Load the KIC.
+    kic = pd.read_hdf(os.path.join(data_directory, "kic", "kic.h5"), "kic")
+
+    # Loop over channels and compute a PSF for each one.
+    n = fitsio.read_header(fn, 0)["NEXTEND"]
+    psfs = np.nan + np.zeros((n, 2*hw+1, 2*hw+1))
+    nstars = np.zeros(n, dtype=int)
+    for k in tqdm(range(n), total=n):
+        img, hdr = fitsio.read(fn, k + 1, header=True)
+        if "CRVAL1" not in hdr:
+            continue
+
+        # Figure out which stars are in the field.
+        w = wcs.WCS(hdr)
+        x, y = w.all_world2pix(15 * np.array(kic.kic_ra),
+                               np.array(kic.kic_dec), 0, quiet=True)
+        m = np.isfinite(x) & (x >= 0) & (x <= img.shape[1])
+        m &= np.isfinite(y) & (y >= 0) & (y <= img.shape[0])
+        x, y = x[m], y[m]
+        mags = np.array(kic.kic_kepmag)[m]
+
+        # Select the stars to use to build the PSF model.
+        mag_mask = np.isfinite(mags)
+        mag_mask &= (mag_range[0] <= mags) & (mags < mag_range[1])
+        nstars[k] = mag_mask.sum()
+
+        # Pad the image with the median flux value.
+        frame = np.median(img) + np.zeros((2*hw+1 + img.shape[0],
+                                           2*hw+1 + img.shape[1]))
+        frame[hw:-hw-1, hw:-hw-1] = img
+
+        # Loop over the stars and compute the cutout for each one.
+        cutouts = np.empty((mag_mask.sum(), 2*hw+1, 2*hw+1))
+        for i in range(len(cutouts)):
+            x0 = int(round(x[mag_mask][i]))
+            y0 = int(round(y[mag_mask][i]))
+            z = np.array(frame[y0:y0+2*hw+1, x0:x0+2*hw+1])
+            z -= np.median(z)
+            cutouts[i] = z / np.sum(z)
+        psfs[k] = np.median(cutouts, axis=0)
+
+    # Clip and normalize the PSF models.
+    psfs = np.clip(psfs, 0, np.inf)
+    psfs /= np.sum(psfs, axis=(1, 2))[:, None, None]
+
+    # Save the PSF models.
+    ident = os.path.split(fn)[-1][4:-13]
+    outfn = os.path.join(data_directory, "psf")
+    fitsio.write(outfn + ".fits", psfs, clobber=True)
+
+    # Plot the PSF images.
+    with PdfPages(outfn + ".pdf") as pdf:
+        for k, psf in enumerate(psfs):
+            psf[~np.isfinite(psf)] = 0.0
+            norm = ImageNormalize(stretch=SqrtStretch())
+            plt.imshow(psf, cmap="gray", interpolation="nearest", norm=norm)
+            plt.title("{0} / channel {1} / {2} stars".format(ident, k + 1,
+                                                             nstars[k]))
+            plt.axis("off")
+            pdf.savefig(bbox_inches="tight")
+            plt.close()
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("kepcal_data", help="the kepcal data directory")
+    parser.add_argument("ffi", help="the path to an FFI FITS file")
+    args = parser.parse_args()
+
+    compute_psf(args.kepcal_data, args.ffi)

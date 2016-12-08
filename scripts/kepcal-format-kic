@@ -12,7 +12,7 @@ __all__ = ["format_kic"]
 def format_kic(data_directory):
     fn = os.path.join(data_directory, "kic", "kic.txt")
     print("Loading KIC from txt file...")
-    df = pd.read_csv(fn)
+    df = pd.read_csv(fn, sep="|")
     print("Saving to HDF5 format...")
     fn = os.path.join(data_directory, "kic", "kic.h5")
     df.to_hdf(fn, "kic", format="t")
