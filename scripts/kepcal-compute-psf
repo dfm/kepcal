@@ -26,9 +26,15 @@ def compute_psf(data_directory, fn, mag_range=[9, 14], hw=20):
     # Loop over channels and compute a PSF for each one.
     n = fitsio.read_header(fn, 0)["NEXTEND"]
     psfs = np.nan + np.zeros((n, 2*hw+1, 2*hw+1))
-    nstars = np.zeros(n, dtype=int)
+    meta = np.empty(n, dtype=[("channel", int), ("module", int),
+                              ("nstars", int)])
+    meta_hdr = dict(FILENAME=os.path.split(fn)[1])
     for k in tqdm(range(n), total=n):
         img, hdr = fitsio.read(fn, k + 1, header=True)
+        meta[k]["channel"] = hdr["CHANNEL"]
+        meta[k]["module"] = hdr["MODULE"]
+        meta[k]["nstars"] = 0
+
         if "CRVAL1" not in hdr:
             continue
 
@@ -44,7 +50,7 @@ def compute_psf(data_directory, fn, mag_range=[9, 14], hw=20):
         # Select the stars to use to build the PSF model.
         mag_mask = np.isfinite(mags)
         mag_mask &= (mag_range[0] <= mags) & (mags < mag_range[1])
-        nstars[k] = mag_mask.sum()
+        meta[k]["nstars"] = mag_mask.sum()
 
         # Pad the image with the median flux value.
         frame = np.median(img) + np.zeros((2*hw+1 + img.shape[0],
@@ -68,7 +74,8 @@ def compute_psf(data_directory, fn, mag_range=[9, 14], hw=20):
     # Save the PSF models.
     ident = os.path.split(fn)[-1][4:-13]
     outfn = os.path.join(data_directory, "psf")
-    fitsio.write(outfn + ".fits", psfs, clobber=True)
+    fitsio.write(outfn + ".fits", meta, clobber=True, header=meta_hdr)
+    fitsio.write(outfn + ".fits", psfs)
 
     # Plot the PSF images.
     with PdfPages(outfn + ".pdf") as pdf:
@@ -76,8 +83,9 @@ def compute_psf(data_directory, fn, mag_range=[9, 14], hw=20):
             psf[~np.isfinite(psf)] = 0.0
             norm = ImageNormalize(stretch=SqrtStretch())
             plt.imshow(psf, cmap="gray", interpolation="nearest", norm=norm)
-            plt.title("{0} / channel {1} / {2} stars".format(ident, k + 1,
-                                                             nstars[k]))
+            plt.title("{0} / c{1} / m{2} / {3} stars".format(
+                ident, meta[k]["channel"], meta[k]["module"],
+                meta[k]["nstars"]))
             plt.axis("off")
             pdf.savefig(bbox_inches="tight")
             plt.close()

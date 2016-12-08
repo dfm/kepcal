@@ -29,7 +29,6 @@ def index_ffis(data_directory):
             filenames[-1],
             primary_hdr["QUARTER"],
             primary_hdr["SEASON"],
-
         ]
         for k in range(1, primary_hdr["NEXTEND"]+1):
             hdr = fitsio.read_header(fn, k)

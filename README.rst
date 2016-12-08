@@ -33,4 +33,15 @@ You should also download and extract the `Kepler Input Catalog
 
 to save the KIC into a binary format that will be way faster to read.
 
+Estimate the PSF
+----------------
 
+To choose apertures, we use a rough PSF model for each channel. You compute
+this using a single FFI and I haven't found big differences when you use
+different FFIs. To estimate the PSFs, run something like::
+
+    scripts/kepcal-compute-psf $KEPCAL_DATA $KEPCAL_DATA/ffi/kplr2013038133130_ffi-cal.fits
+
+This will save two files ``$KEPCAL_DATA/psf.fits`` and
+``$KEPCAL_DATA/psf.pdf``. The FITS file has an estimate of the PSF for each
+channel and the PDF file has a plot of these images.
