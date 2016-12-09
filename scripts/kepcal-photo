@@ -1,0 +1,232 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+from __future__ import division, print_function
+
+import os
+from itertools import product
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+from scipy.interpolate import RectBivariateSpline
+from scipy.ndimage import gaussian_filter
+
+import fitsio
+from tqdm import tqdm
+
+from astropy import wcs
+from astropy.visualization import SqrtStretch
+from astropy.visualization.mpl_normalize import ImageNormalize
+
+__all__ = ["photo"]
+
+
+def compute_aperture(frame, x_cen, y_cen, x, y, psf_model, hw=10,
+                     snr_thresh=25, plot=False):
+    # Choose the stars in this frame
+    rx = x - x_cen
+    ry = y - y_cen
+    msk = (-2*hw <= rx) & (rx <= 2*hw) & (-2*hw <= ry) & (ry <= 2*hw)
+    s = np.argsort(rx[msk]**2 + ry[msk]**2)
+    rx, ry = rx[msk][s], ry[msk][s]
+
+    # Build the design matrix
+    A = np.zeros((msk.sum() + 1, (2*hw+1)**2))
+    xx, yy = np.arange(-hw, hw+1), np.arange(-hw, hw+1)
+    for i in range(len(rx)):
+        A[i] = psf_model(-ry[i]+yy, -rx[i]+xx, grid=True).flatten()
+    A[-1] = 1.0
+    A = np.clip(A, 0, np.inf)
+    img = frame[y_cen:y_cen+2*hw+1, x_cen:x_cen+2*hw+1]
+    Y = np.array(img).flatten()
+
+    # Compute the maximum likelihood image model
+    ATA = np.dot(A, A.T)
+    ATA[np.diag_indices_from(ATA)] += 1e-10
+    w = np.linalg.solve(ATA, np.dot(A, Y))
+    others = np.dot(w[1:-1], A[1:-1]).reshape((2*hw+1, 2*hw+1))
+    model = (A[0] * w[0]).reshape((2*hw+1, 2*hw+1))
+
+    # Compute the S/N of the target star in each pixel
+    snr = model / np.sqrt(img)
+    snr = gaussian_filter(snr, 0.7)
+
+    # Choose the aperture based on the S/N threshold
+    ap = np.zeros_like(model, dtype=bool)
+    ap[hw, hw] = True
+    ap[snr > snr_thresh] = True
+
+    # Compute the approximate fraction of the flux that is from the target
+    target_fraction = model[ap].sum() / (others[ap] + model[ap]).sum()
+    target_fraction = np.clip(target_fraction, 0.0, 1.0)
+
+    if plot:
+        norm = ImageNormalize(stretch=SqrtStretch())
+        fig, axes = plt.subplots(1, 3)
+        axes[0].imshow(img, interpolation="nearest", cmap="gray_r", norm=norm)
+        axes[1].imshow(model, interpolation="nearest", cmap="gray_r",
+                       norm=norm)
+        axes[2].imshow(others, interpolation="nearest", cmap="gray_r",
+                       norm=norm)
+        for ax in axes:
+            ax.imshow(ap, cmap="BuPu", interpolation="nearest", alpha=0.1)
+            ax.plot(hw, hw, "ob")
+            ax.plot(rx+hw, ry+hw, ".r")
+            ax.set_xlim(-0.5, 2*hw+0.5)
+            ax.set_ylim(-0.5, 2*hw+0.5)
+            ax.set_yticklabels([])
+            ax.set_xticklabels([])
+        return ap, (y_cen - hw, x_cen - hw), target_fraction, fig
+
+    return ap, (y_cen - hw, x_cen - hw), target_fraction
+
+
+def do_photo(data_directory, kic, index, season, skygroup, mag_range,
+             hw, snr_thresh):
+    # Select the datasets for this season/skygroup.
+    m = index.skygroup == skygroup
+    m &= index.season == season
+    m &= index.filename != "kplr2009170043915_ffi"
+    datasets = index[m]
+    if not np.all(np.isfinite(datasets.ra_ref)):
+        print("Bad module")
+        return
+
+    # Select and load the middle dataset to choose the apertures.
+    mid_time = 0.5 * (datasets.time.max() + datasets.time.min())
+    mid_id = np.argmin(np.abs(datasets.time - mid_time))
+    mid_dataset = datasets.loc[mid_id]
+    channel = mid_dataset.channel
+    fn = os.path.join(data_directory, "ffi",
+                      "{0}-cal.fits".format(mid_dataset.filename))
+    flux, hdr = fitsio.read(fn, channel, header=True)
+
+    # Trim virtual pixels: https://keplergo.arc.nasa.gov/PipelineCAL.shtml
+    flux = flux[20:-26, 12:-20]
+
+    # Load the PSF image for this channel.
+    fn = os.path.join(data_directory, "psf.fits")
+    meta = fitsio.read(fn, 1)
+    m = meta["channel"] == channel
+    psf = fitsio.read(fn, 2)[m][0]
+    if not np.any(psf > 0.0):
+        print("Bad PSF image")
+        return
+
+    # Compute the coordinates of the stars on the detector and correct for
+    # the virtual pixels.
+    w = wcs.WCS(hdr)
+    x, y = w.all_world2pix(15 * np.array(kic.kic_ra), np.array(kic.kic_dec),
+                           0, quiet=True)
+    x -= 12
+    y -= 20
+
+    # Get the parameters of the stars on the detector.
+    m = np.isfinite(x) & (x >= 0) & (x <= flux.shape[1])
+    m &= np.isfinite(y) & (y >= 0) & (y <= flux.shape[0])
+    x, y = x[m], y[m]
+    mags = np.array(kic.kic_kepmag)[m]
+    kicids = np.array(kic.kic_kepler_id)[m]
+
+    # Select the stars to use to build the PSF model.
+    mag_mask = np.isfinite(mags)
+    mag_mask &= (mag_range[0] <= mags) & (mags < mag_range[1])
+
+    psf_hw = (psf.shape[0] - 1)//2
+    psf_xx, psf_yy = np.arange(-psf_hw, psf_hw+1), np.arange(-psf_hw, psf_hw+1)
+    psf_model = RectBivariateSpline(psf_yy, psf_xx, psf)
+
+    # Pad the frame with the half width.
+    frame = np.median(flux) + np.zeros((2*hw+1 + flux.shape[0],
+                                        2*hw+1 + flux.shape[1]))
+    frame[hw:-hw-1, hw:-hw-1] = flux
+
+    # Loop over stars and compute the apertures for each target.
+    n = mag_mask.sum()
+    apertures = np.empty(n, dtype=[
+        ("kicid", int), ("kepmag", float), ("coord_1", int), ("coord_2", int),
+        ("target_fraction", float), ("aperture", bool, (2*hw+1)**2)
+    ])
+    for j in tqdm(range(n), total=n):
+        x_cen, y_cen = int(round(x[mag_mask][j])), int(round(y[mag_mask][j]))
+        ap, coords, frac = compute_aperture(frame, x_cen, y_cen, x, y,
+                                            psf_model, hw=hw,
+                                            snr_thresh=snr_thresh)
+        apertures["kicid"][j] = kicids[mag_mask][j]
+        apertures["kepmag"][j] = mags[mag_mask][j]
+        apertures["coord_1"][j] = coords[0]
+        apertures["coord_2"][j] = coords[1]
+        apertures["target_fraction"][j] = frac
+        apertures["aperture"][j] = ap.flatten()
+
+    # Do the aperture photometry in each dataset.
+    flux = np.zeros_like(frame)
+    flux_err = np.zeros_like(frame)
+    ap_flux = np.empty((len(datasets), len(apertures)))
+    ap_flux_err = np.empty_like(ap_flux)
+    for i, (_, dataset) in tqdm(enumerate(datasets.iterrows()),
+                                total=len(datasets)):
+        fn = os.path.join(data_directory, "ffi",
+                          "{0}-cal.fits".format(dataset.filename))
+        tmp, hdr = fitsio.read(fn, channel, header=True)
+        flux[hw:-hw-1, hw:-hw-1] = tmp[20:-26, 12:-20]
+        tmp = fitsio.read(fn.replace("-cal.fits", "-uncert.fits"), channel)
+        flux_err[hw:-hw-1, hw:-hw-1] = tmp[20:-26, 12:-20]
+
+        # Loop over each star for this dataset.
+        for j, ap in enumerate(apertures):
+            xi = ap["coord_1"]
+            yi = ap["coord_2"]
+            aperture = ap["aperture"].reshape((2*hw+1, 2*hw+1))
+            s1 = slice(xi+hw, xi+3*hw+1)
+            s2 = slice(yi+hw, yi+3*hw+1)
+            cut = flux[s1, s2]
+            ap_flux[i, j] = (cut[aperture] - np.median(cut[~aperture])).sum()
+            ap_flux_err[i, j] = np.sqrt((flux_err[s1, s2][aperture]**2).sum())
+
+    # Save the output file.
+    fn = os.path.join(data_directory, "photo",
+                      "photo_skygroup_{0}_season_{1}.fits"
+                      .format(skygroup, season))
+    header = dict(
+        SEASON=season,
+        CHANNEL=channel,
+        SKYGROUP=skygroup,
+        MODULE=int(datasets.iloc[0].module),
+        OUTPUT=int(datasets.iloc[0].output),
+    )
+    meta = datasets[["quarter", "tstart", "tstop", "time"]].to_records(
+        index=False)
+    fitsio.write(fn, meta, header=header, clobber=True)
+    fitsio.write(fn, apertures)
+    fitsio.write(fn, ap_flux.T)
+    fitsio.write(fn, ap_flux_err.T)
+
+
+def photo(data_directory, mag_range=[9, 14], hw=5, snr_thresh=25):
+    os.makedirs(os.path.join(data_directory, "photo"), exist_ok=True)
+
+    # Load the index.
+    index = pd.read_csv(os.path.join(data_directory, "index.csv"))
+    seasons = list(set(index.season))
+    skygroups = list(set(index.skygroup))
+
+    # Load the KIC.
+    kic = pd.read_hdf(os.path.join(data_directory, "kic", "kic.h5"), "kic")
+
+    for skygroup, season in product(skygroups, seasons):
+        print("season {0} / skygroup {1}".format(season, skygroup))
+        do_photo(data_directory, kic, index, season, skygroup, mag_range,
+                 hw, snr_thresh)
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("kepcal_data", help="the kepcal data directory")
+    args = parser.parse_args()
+
+    photo(args.kepcal_data)
