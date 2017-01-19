@@ -129,6 +129,8 @@ def do_photo(data_directory, kic, index, season, skygroup, mag_range,
     x, y = x[m], y[m]
     mags = np.array(kic.kic_kepmag)[m]
     kicids = np.array(kic.kic_kepler_id)[m]
+    ras = 15 * np.array(kic.kic_ra)[m]
+    decs = np.array(kic.kic_dec)[m]
 
     # Select the stars to use to build the PSF model.
     mag_mask = np.isfinite(mags)
@@ -146,8 +148,9 @@ def do_photo(data_directory, kic, index, season, skygroup, mag_range,
     # Loop over stars and compute the apertures for each target.
     n = mag_mask.sum()
     apertures = np.empty(n, dtype=[
-        ("kicid", int), ("kepmag", float), ("coord_1", int), ("coord_2", int),
-        ("target_fraction", float), ("aperture", bool, (2*hw+1)**2)
+        ("kicid", int), ("kepmag", float), ("ra", float), ("dec", float),
+        ("coord_1", int), ("coord_2", int), ("target_fraction", float),
+        ("aperture", bool, (2*hw+1)**2)
     ])
     for j in tqdm(range(n), total=n):
         x_cen, y_cen = int(round(x[mag_mask][j])), int(round(y[mag_mask][j]))
@@ -156,6 +159,8 @@ def do_photo(data_directory, kic, index, season, skygroup, mag_range,
                                             snr_thresh=snr_thresh)
         apertures["kicid"][j] = kicids[mag_mask][j]
         apertures["kepmag"][j] = mags[mag_mask][j]
+        apertures["ra"][j] = ras[mag_mask][j]
+        apertures["dec"][j] = decs[mag_mask][j]
         apertures["coord_1"][j] = coords[0]
         apertures["coord_2"][j] = coords[1]
         apertures["target_fraction"][j] = frac
@@ -205,7 +210,7 @@ def do_photo(data_directory, kic, index, season, skygroup, mag_range,
     fitsio.write(fn, ap_flux_err.T)
 
 
-def photo(data_directory, mag_range=[9, 14], hw=5, snr_thresh=25):
+def photo(data_directory, mag_range=[9, 17], hw=5, snr_thresh=25):
     os.makedirs(os.path.join(data_directory, "photo"), exist_ok=True)
 
     # Load the index.
