@@ -34,29 +34,28 @@ class KepCal(object):
         self.Y /= np.median(Y, axis=1)[:, None]
 
     def initialize(self):
-        F = np.ones(self.nstars)
         C = np.median(self.Y, axis=0)
         Z = np.empty((self.nstars, self.nseasons))
         for s in range(self.nseasons):
             Z[:, s] = np.median((self.Y / C)[:, self.seasons == s], axis=1)
-        F_pred = self.Y / (Z[:, self.seasons] * C)
-        lnV = np.log(np.median((F_pred - 1.0)**2, axis=1))
-        lnS = -4 + np.zeros_like(C)
+        resid2 = (self.Y - Z[:, self.seasons] * C)**2
+        lnV = np.log(np.median(resid2, axis=1))
+        lnS = np.log(np.median(resid2, axis=0))
+        jitter = np.log(0.1*np.median(np.abs(np.diff(self.Y, axis=1))))
 
         self.Z = theano.shared(Z, name="Z1")
         self.C = theano.shared(C, name="C")
-        self.F = theano.shared(F, name="F")
         self.lnV = theano.shared(lnV, name="lnV")
         self.lnS = theano.shared(lnS, name="lnS")
-        self.jitter = theano.shared(-5.0, name="jitter")
+        self.jitter = theano.shared(jitter, name="jitter")
+        # self.jitter = theano.shared(-8.0, name="jitter")
 
     def get_training_function(self, **adam_args):
         t_in = T.dvector("t")
         Y_in = T.dmatrix("Y")
 
         z = self.Z[:, self.seasons]
-        Y_var = (z * self.C[None, :])**2 * T.exp(self.lnV)[:, None]
-        Y_var += z**2 * T.exp(self.lnS)[None, :]
+        Y_var = T.exp(self.lnV)[:, None] + T.exp(self.lnS)[None, :]
         Y_var += T.exp(2*self.jitter)
 
         # Compute the model and the likelihood of the data
@@ -66,10 +65,9 @@ class KepCal(object):
 
         # Apply the GP
         if self.kernel is not None:
-            white_noise = z[0]**2 * T.exp(self.lnS)
+            white_noise = T.exp(self.lnS)
             white_noise += T.exp(2*self.jitter)
             K = self.kernel.get_value(t_in[:, None] - t_in[None, :])
-            # K += white_noise * T.identity_like(K)
             K += T.nlinalg.alloc_diag(white_noise)
             alpha = T.dot(sT.matrix_inverse(K), resid[0])
             cost += T.dot(resid[0], alpha) + T.log(sT.det(K))
@@ -95,9 +93,16 @@ class KepCal(object):
     def train(self, **kwargs):
         niter = kwargs.pop("niter", 5000)
         train_fn, args = self.get_training_function(**kwargs)
+        cost = np.empty(niter)
         for i in tqdm.tqdm(range(niter), total=niter):
-            cost = train_fn(*args)
+            cost[i] = train_fn(*args)
         return cost
+
+    def get_parameter_vector(self):
+        params = [self.C, self.Z, self.lnV, self.lnS, self.jitter]
+        if self.kernel is not None:
+            params.append(self.kernel.parameter_vector)
+        return [p.get_value() for p in params]
 
     def calibrate(self):
         Y_in = T.dmatrix("Y")
