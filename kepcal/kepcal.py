@@ -55,7 +55,7 @@ class KepCal(object):
         Y_in = T.dmatrix("Y")
 
         z = self.Z[:, self.seasons]
-        Y_var = T.exp(self.lnV)[:, None] + T.exp(self.lnS)[None, :]
+        Y_var = z**2*(self.C[None, :]**2 * T.exp(self.lnV)[:, None] + T.exp(self.lnS)[None, :])
         Y_var += T.exp(2*self.jitter)
 
         # Compute the model and the likelihood of the data
