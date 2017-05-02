@@ -48,14 +48,14 @@ class KepCal(object):
         self.lnV = theano.shared(lnV, name="lnV")
         self.lnS = theano.shared(lnS, name="lnS")
         self.jitter = theano.shared(jitter, name="jitter")
-        # self.jitter = theano.shared(-8.0, name="jitter")
 
     def get_training_function(self, **adam_args):
         t_in = T.dvector("t")
         Y_in = T.dmatrix("Y")
 
         z = self.Z[:, self.seasons]
-        Y_var = z**2*(self.C[None, :]**2 * T.exp(self.lnV)[:, None] + T.exp(self.lnS)[None, :])
+        Y_var = z**2*(self.C[None, :]**2 * T.exp(self.lnV)[:, None] +
+                      T.exp(self.lnS)[None, :])
         Y_var += T.exp(2*self.jitter)
 
         # Compute the model and the likelihood of the data
@@ -65,7 +65,7 @@ class KepCal(object):
 
         # Apply the GP
         if self.kernel is not None:
-            white_noise = T.exp(self.lnS)
+            white_noise = z[0]**2*T.exp(self.lnS)
             white_noise += T.exp(2*self.jitter)
             K = self.kernel.get_value(t_in[:, None] - t_in[None, :])
             K += T.nlinalg.alloc_diag(white_noise)
